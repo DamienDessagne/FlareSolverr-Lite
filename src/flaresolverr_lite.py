@@ -264,7 +264,7 @@ async def wait_for_completion(page):
                     break
             if not is_challenge:
                 if cf_challenge_detected:
-                    log(f"[INFO] CloudFlare challenge solved after {elapsed}s")
+                    log(f"[INFO] CloudFlare challenge solved after {'{:.2f}'.format(elapsed)}s")
                 return "html", None, None
         except:
             pass
@@ -389,7 +389,7 @@ async def process_request_in_tab(url):
             return {"status": "error", "message": str(e)}
 
     else:
-        log(f"[ERROR] Timeout after {time.time() - start_time}s")
+        log(f"[ERROR] Timeout after {'{:.2f}'.format(time.time() - start_time)}s")
         return {"status": "error", "message": "Cloudflare timeout or Download failed"}
 
 async def solve_challenge(url):
