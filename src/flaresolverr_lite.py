@@ -127,8 +127,18 @@ async def force_kill_chrome():
 
     # 2. Hard kill
     try:
-        subprocess.run("taskkill /F /IM chrome.exe", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-        await asyncio.sleep(5) # Give OS time to release the port and locks
+        if os.name == 'nt':
+            profile_folder = os.path.basename(CHROME_PROFILE)
+            # WMIC command: delete process where name is chrome.exe AND commandline contains the profile folder
+            cmd = f'wmic process where "name=\'chrome.exe\' and commandline like \'%{profile_folder}%\'" call terminate'
+            subprocess.run(cmd, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            await asyncio.sleep(2)
+        else:
+            # Fallback for Linux/Mac (pkill -f matches full command line)
+            profile_folder = os.path.basename(CHROME_PROFILE)
+            subprocess.run(f"pkill -f {profile_folder}", shell=True, stderr=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL)
+            await asyncio.sleep(2)
     except Exception:
         pass
 
