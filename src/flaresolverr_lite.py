@@ -1,6 +1,5 @@
 import asyncio
 import mimetypes
-import msvcrt
 import os
 import subprocess
 import sys
@@ -8,6 +7,14 @@ import tempfile
 import time
 from datetime import datetime
 from urllib.parse import urlparse
+
+# Cross-platform input handling (Windows/Linux)
+try:
+    import msvcrt
+except ImportError:
+    import select
+
+    msvcrt = None
 
 import nodriver as uc
 from aiohttp import web
@@ -76,25 +83,37 @@ def smart_wait(seconds):
     if seconds <= 0:
         return
 
-    log(f"[INFO] Waiting {seconds}s before starting Chrome...")
-    print("   >> Press any key to SKIP waiting immediately <<")
+    log(f"[INFO] Waiting {seconds}s before starting...")
+    print("   >> Press ENTER to SKIP waiting <<")
     for i in range(seconds, 0, -1):
         sys.stdout.write(f"\r   ... Starting in {i} seconds ...   ")
         sys.stdout.flush()
         for _ in range(10):
-            if msvcrt.kbhit(): 
-                msvcrt.getch() 
+            skip = False
+            if msvcrt:
+                # Windows
+                if msvcrt.kbhit():
+                    msvcrt.getch()
+                    skip = True
+            else:
+                # Linux / Unix (Requires hitting Enter usually)
+                if select.select([sys.stdin], [], [], 0)[0]:
+                    sys.stdin.readline()
+                    skip = True
+
+            if skip:
                 print("\n")
                 log("[INFO] Startup wait skipped by user.")
-                return 
+                return
             time.sleep(0.1)
     print("\n")
     log("[INFO] Startup wait complete.")
 
+
 async def force_kill_chrome():
     global browser
     log("[INFO] Maintenance: Killing old Chrome processes...")
-    
+
     # 1. Graceful stop attempt
     if browser:
         try:
@@ -271,16 +290,18 @@ async def process_request_in_tab(url):
 
     # Clean up temp dir just in case
     for f in os.listdir(RUNTIME_TEMP_DIR):
-        try: os.remove(os.path.join(RUNTIME_TEMP_DIR, f))
-        except: pass
+        try:
+            os.remove(os.path.join(RUNTIME_TEMP_DIR, f))
+        except:
+            pass
 
     page = await get_main_tab()
     await page.bring_to_front()
 
     try:
-        await page.get(url) 
+        await page.get(url)
     except Exception:
-        pass 
+        pass
 
     result_type, filename, filepath = await wait_for_completion(page)
 
