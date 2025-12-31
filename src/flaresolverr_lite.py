@@ -26,20 +26,17 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # --- CONFIGURATION ---
 # ---------------------
 
-PORT = 8191 # The port the server will listen on
-CHROME_PROFILE = os.path.join(PROJECT_ROOT, "chrome_profile") # The Chrome profile to use
-STARTUP_DELAY_SECONDS = 90 # The time to wait before starting the server. Useful if you run at startup with everything.
+PORT = 8191  # The port the server will listen on
+CHROME_PROFILE = os.path.join(PROJECT_ROOT, "chrome_profile")  # The Chrome profile to use
+STARTUP_DELAY_SECONDS = 90  # The time to wait before starting the server. Useful if you run at startup with everything.
 
 # TIMEOUTS (Seconds)
-CF_WAIT_TIMEOUT = 60        # Max time to resolve Cloudflare per page
-DOWNLOAD_TIMEOUT = 60       # Max time to wait for a file download to complete, or None if you don't want timeout
-CF_CLICK_DELAY = 20         # Delay before attempting a force click
-REQUEST_TIMEOUT = 180       # Hard cap for the HTTP response (Supervisor)
-
+CF_WAIT_TIMEOUT = 60  # Max time to resolve Cloudflare per page
+DOWNLOAD_TIMEOUT = 60  # Max time to wait for a file download to complete, or None if you don't want timeout
+CF_CLICK_DELAY = 20  # Delay before attempting a force click
+DEFAULT_REQUEST_TIMEOUT = 180  # Default hard cap if Prowlarr doesn't provide one
 
 # ---------------------
-
-
 
 
 # CHALLENGE TRIGGERS
@@ -112,7 +109,7 @@ def smart_wait(seconds):
 
 async def force_kill_chrome():
     global browser
-    log("[INFO] Maintenance: Killing old Chrome processes...")
+    log("[INFO] Maintenance: Killing old script-specific Chrome processes...")
 
     # 1. Graceful stop attempt
     if browser:
@@ -125,16 +122,14 @@ async def force_kill_chrome():
             pass
     browser = None
 
-    # 2. Hard kill
+    # 2. Targeted Kill
     try:
         if os.name == 'nt':
             profile_folder = os.path.basename(CHROME_PROFILE)
-            # WMIC command: delete process where name is chrome.exe AND commandline contains the profile folder
             cmd = f'wmic process where "name=\'chrome.exe\' and commandline like \'%{profile_folder}%\'" call terminate'
             subprocess.run(cmd, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             await asyncio.sleep(2)
         else:
-            # Fallback for Linux/Mac (pkill -f matches full command line)
             profile_folder = os.path.basename(CHROME_PROFILE)
             subprocess.run(f"pkill -f {profile_folder}", shell=True, stderr=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL)
@@ -335,7 +330,7 @@ async def process_request_in_tab(url):
 
                 body_response = file_content.decode('latin-1')
 
-                log(f"[SUCCESS] Downloaded file: {filename} ({'{:.2f}'.format(len(file_content)/1024)}kb) in "
+                log(f"[SUCCESS] Downloaded file: {filename} ({'{:.2f}'.format(len(file_content) / 1024)}kb) in "
                     f"{'{:.2f}'.format(time.time() - start_time)}s")
                 return {
                     "status": "ok",
@@ -419,7 +414,13 @@ async def handle_post(request):
     try:
         data = await request.json()
         cmd = data.get('cmd')
-        
+
+        max_timeout_ms = data.get('maxTimeout')
+        if max_timeout_ms and isinstance(max_timeout_ms, (int, float)):
+            request_timeout = max_timeout_ms / 1000.0
+        else:
+            request_timeout = DEFAULT_REQUEST_TIMEOUT
+
         if cmd in ['sessions.create', 'sessions.list']:
             return web.json_response({"status": "ok", "sessions": ["prowlarr"]})
         elif cmd == 'sessions.destroy':
@@ -428,10 +429,10 @@ async def handle_post(request):
             try:
                 # SUPERVISOR TIMEOUT
                 return web.json_response(
-                    await asyncio.wait_for(solve_challenge(data.get('url')), timeout=REQUEST_TIMEOUT)
+                    await asyncio.wait_for(solve_challenge(data.get('url')), timeout=request_timeout)
                 )
             except asyncio.TimeoutError:
-                log("[CRITICAL] REQUEST TIMEOUT! Killing browser.")
+                log(f"[CRITICAL] REQUEST TIMEOUT ({request_timeout}s)! Killing browser.")
                 await force_kill_chrome()
                 # Break lock
                 if browser_lock.locked():
