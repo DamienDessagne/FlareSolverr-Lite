@@ -1,6 +1,6 @@
 # FlareSolverr-Lite
 
-> A lightweight FlareSolverr alternative based on Nodriver. Uses native Chrome to solve Cloudflare challenges and reliably download files from CloudFlare protected websites.
+A lightweight FlareSolverr alternative based on Nodriver. Uses native Chrome to solve Cloudflare challenges and reliably download files from CloudFlare protected websites.
 
 ## Why?
 Original FlareSolverr is great but can struggle with:
