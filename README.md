@@ -5,7 +5,7 @@ A lightweight FlareSolverr alternative based on Nodriver. Uses native Chrome to 
 ## Why?
 Original FlareSolverr is great but can struggle with:
 - **Cloudflare v2 detection** (due to Selenium/Undetected-Chromedriver TLS fingerprinting).
-- **File downloads** (especially .torrent files protected by challenges).
+- **File downloads**.
 - **Heavy resource usage** (Docker, multiple sessions).
 
 **FlareSolverr-Lite** solves this by using **Nodriver** (direct CDP protocol) and your system's native Chrome browser with a dedicated profile. It is strictly single-threaded and crash-proof by design.
