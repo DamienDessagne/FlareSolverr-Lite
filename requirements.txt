@@ -1,0 +1,2 @@
+nodriver>=0.30
+aiohttp
