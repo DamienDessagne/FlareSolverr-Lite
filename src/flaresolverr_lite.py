@@ -31,8 +31,6 @@ CHROME_PROFILE = os.path.join(PROJECT_ROOT, "chrome_profile")  # The Chrome prof
 STARTUP_DELAY_SECONDS = 90  # The time to wait before starting the server. Useful if you run at startup with everything.
 
 # TIMEOUTS (Seconds)
-CF_WAIT_TIMEOUT = 60  # Max time to resolve Cloudflare per page
-DOWNLOAD_TIMEOUT = 60  # Max time to wait for a file download to complete, or None if you don't want timeout
 CF_CLICK_DELAY = 20  # Delay before attempting a force click
 DEFAULT_REQUEST_TIMEOUT = 180  # Default hard cap if Prowlarr doesn't provide one
 
@@ -235,19 +233,22 @@ async def wait_for_completion(page):
     start_time = time.time()
     cf_challenge_detected = False
     click_triggered = False
-    
-    while (time.time() - start_time) < CF_WAIT_TIMEOUT:
-        
+
+    # Infinite loop: The Supervisor (handle_post) will kill the task via asyncio.TimeoutError
+    while True:
+
         # 1. DOWNLOAD (Priority)
         if current_download["active"]:
             log("[INTERCEPTOR] Download detected. Waiting for completion...")
-            try:
-                await asyncio.wait_for(current_download["event"].wait(), timeout=DOWNLOAD_TIMEOUT)
-                if current_download["completed"] and current_download["filepath"]:
-                    return "download", current_download["filename"], current_download["filepath"]
-            except asyncio.TimeoutError:
-                log("[ERROR] Download timed out.")
-                return "error", None, None
+            # We wait indefinitely for the event; the Supervisor handles the global timeout
+            await current_download["event"].wait()
+
+            if current_download["completed"] and current_download["filepath"]:
+                return "download", current_download["filename"], current_download["filepath"]
+
+            # If canceled or failed, we continue the loop (or you could return error)
+            if not current_download["active"]:
+                log("[WARN] Download canceled, resuming page checks...")
 
         # 2. HTML CONTENT
         elapsed = time.time() - start_time
@@ -279,8 +280,7 @@ async def wait_for_completion(page):
             log(f"[WAIT] Processing... ({int(elapsed)}s)")
             
         await asyncio.sleep(1)
-    
-    return "timeout", None, None
+
 
 async def process_request_in_tab(url):
     start_time = time.time()
@@ -388,9 +388,9 @@ async def process_request_in_tab(url):
             log(f"[ERROR] Error: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-    else:
-        log(f"[ERROR] Timeout after {'{:.2f}'.format(time.time() - start_time)}s")
-        return {"status": "error", "message": "Cloudflare timeout or Download failed"}
+    # Fallback (Should be unreachable with infinite loop, but safe to keep)
+    return {"status": "error", "message": "Unknown error"}
+
 
 async def solve_challenge(url):
     global browser
@@ -428,6 +428,7 @@ async def handle_post(request):
         elif cmd in ['request.get', 'request.post']:
             try:
                 # SUPERVISOR TIMEOUT
+                # This wait_for controls the entire execution life-cycle.
                 return web.json_response(
                     await asyncio.wait_for(solve_challenge(data.get('url')), timeout=request_timeout)
                 )
