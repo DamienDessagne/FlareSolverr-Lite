@@ -425,7 +425,7 @@ async def handle_post(request):
             return web.json_response({"status": "ok", "message": "Session destroyed"})
         elif cmd in ['request.get', 'request.post']:
             try:
-                log(f"[QUEUE] Request received: {data.get('url')} (timeout: {request_timeout})")
+                log(f"[QUEUE] Request received: {data.get('url')} (timeout: {request_timeout}s)")
 
                 # SUPERVISOR TIMEOUT
                 # This wait_for controls the entire execution life-cycle.
