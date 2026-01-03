@@ -394,9 +394,6 @@ async def process_request_in_tab(url):
 
 async def solve_challenge(url):
     global browser
-
-    log(f"[QUEUE] Request received: {url}")
-
     await browser_lock.acquire()
 
     try:
@@ -428,6 +425,8 @@ async def handle_post(request):
             return web.json_response({"status": "ok", "message": "Session destroyed"})
         elif cmd in ['request.get', 'request.post']:
             try:
+                log(f"[QUEUE] Request received: {data.get('url')} (timeout: {request_timeout})")
+
                 # SUPERVISOR TIMEOUT
                 # This wait_for controls the entire execution life-cycle.
                 return web.json_response(
