@@ -212,13 +212,13 @@ async def get_main_tab():
         if not await start_browser():
             raise Exception("Browser unavailable")
     try:
-        if not browser.tabs:
-            return await browser.get("about:blank", new_tab=True)
-        return browser.tabs[0]
+        if not getattr(browser, 'main_tab', None):
+            return await browser.get("about:blank", new_tab=True, new_window=False)
+        return browser.main_tab
     except Exception:
         await force_kill_chrome()
         await start_browser()
-        return browser.tabs[0]
+        return await browser.get("about:blank", new_tab=True, new_window=False)
 
 
 async def safe_verify_cf(page):
