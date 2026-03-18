@@ -355,23 +355,40 @@ async def process_request_in_tab(url):
     # --- RESULT: HTML ---
     elif result_type == "html":
         try:
-            cdp_cookies = await page.send(cdp.storage.get_cookies())
-            user_agent = await page.evaluate("navigator.userAgent")
+            async def extract_data():
+                # BYPASS NODRIVER ISSUE WITH NEW CHROME COOKIES FORMAT
+                def raw_get_cookies(urls):
+                    cmd_dict = {
+                        "method": "Network.getCookies",
+                        "params": {"urls": urls}
+                    }
+                    response = yield cmd_dict
+                    return response.get("cookies", [])
+
+                log("[INFO] Extracting cookies...")
+                raw_cookies = await page.send(raw_get_cookies([url]))
+                log("[INFO] Extracting user agent...")
+                ua = await page.evaluate("navigator.userAgent")
+                log("[INFO] Extracting HTML content...")
+                html = await page.get_content()
+
+                return raw_cookies, ua, html
+
+            cdp_cookies, user_agent, html_content = await asyncio.wait_for(extract_data(), timeout=15.0)
 
             cookies = []
             domain_key = urlparse(url).netloc
 
             for c in cdp_cookies:
-                if c.domain.lstrip('.') in domain_key or domain_key in c.domain:
+                domain = c.get("domain", "")
+                if domain.lstrip('.') in domain_key or domain_key in domain:
                     cookies.append({
-                        "name": c.name,
-                        "value": c.value,
-                        "domain": c.domain,
-                        "path": c.path,
-                        "expiry": int(c.expires) if hasattr(c, 'expires') else -1
+                        "name": c.get("name"),
+                        "value": c.get("value"),
+                        "domain": domain,
+                        "path": c.get("path", "/"),
+                        "expiry": int(c.get("expires", -1))
                     })
-
-            html_content = await page.get_content()
 
             log(f"[SUCCESS] HTML Content retrieved in {'{:.2f}'.format(time.time() - start_time)}s. ({len(cookies)} cookies)")
             return {
