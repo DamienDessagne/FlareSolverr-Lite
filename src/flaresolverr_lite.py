@@ -28,11 +28,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PORT = 8191  # The port the server will listen on
 CHROME_PROFILE = os.path.join(PROJECT_ROOT, "chrome_profile")  # The Chrome profile to use
-STARTUP_DELAY_SECONDS = 90  # The time to wait before starting the server. Useful if you run at startup with everything.
+STARTUP_DELAY_SECONDS = 90  # Time to wait before starting the server
 
 # TIMEOUTS (Seconds)
-CF_CLICK_DELAY = 20  # Delay before attempting a force click
-DEFAULT_REQUEST_TIMEOUT = 180  # Default hard cap if Prowlarr doesn't provide one
+CF_CLICK_DELAY = 20  # Delay before attempting a forced click on challenges
+DEFAULT_REQUEST_TIMEOUT = 180  # Default hard cap if the client doesn't provide a maxTimeout
 
 # ---------------------
 
@@ -121,7 +121,7 @@ async def force_kill_chrome():
             pass
     browser = None
 
-    # 2. Targeted Kill
+    # 2. Targeted Process Kill
     try:
         if os.name == 'nt':
             profile_folder = os.path.basename(CHROME_PROFILE)
@@ -184,7 +184,11 @@ async def start_browser():
             )
 
             try:
-                tab = browser.tabs[0]
+                # Target the main visible tab to avoid attaching to background processes/service workers
+                tab = getattr(browser, 'main_tab', None)
+                if not tab:
+                    tab = browser.tabs[0]
+
                 await tab.send(cdp.browser.set_download_behavior(
                     behavior="allow",
                     download_path=os.path.abspath(RUNTIME_TEMP_DIR),
@@ -201,6 +205,7 @@ async def start_browser():
         except Exception as e:
             log(f"[WARN] Start attempt {attempt}/3 failed: {e}")
             await force_kill_chrome()
+
     log("[CRITICAL] Could not start Chrome.")
     return False
 
@@ -212,9 +217,11 @@ async def get_main_tab():
         if not await start_browser():
             raise Exception("Browser unavailable")
     try:
-        if not getattr(browser, 'main_tab', None):
+        # Prioritize main_tab over tabs[0] to prevent hanging on invisible background targets
+        tab = getattr(browser, 'main_tab', None)
+        if not tab:
             return await browser.get("about:blank", new_tab=True, new_window=False)
-        return browser.main_tab
+        return tab
     except Exception:
         await force_kill_chrome()
         await start_browser()
@@ -234,27 +241,25 @@ async def wait_for_completion(page):
     cf_challenge_detected = False
     click_triggered = False
 
-    # Infinite loop: The Supervisor (handle_post) will kill the task via asyncio.TimeoutError
     while True:
-
         # 1. DOWNLOAD (Priority)
         if current_download["active"]:
             log("[INTERCEPTOR] Download detected. Waiting for completion...")
-            # We wait indefinitely for the event; the Supervisor handles the global timeout
             await current_download["event"].wait()
 
             if current_download["completed"] and current_download["filepath"]:
                 return "download", current_download["filename"], current_download["filepath"]
 
-            # If canceled or failed, we continue the loop (or you could return error)
             if not current_download["active"]:
                 log("[WARN] Download canceled, resuming page checks...")
 
         # 2. HTML CONTENT
         elapsed = time.time() - start_time
         try:
-            title = await page.evaluate("document.title") or ""
-            content = await page.get_content() or ""
+            # Brief timeouts prevent deadlocks if the execution context is destroyed during navigation
+            title = await asyncio.wait_for(page.evaluate("document.title"), timeout=2.0) or ""
+            content = await asyncio.wait_for(page.get_content(), timeout=2.0) or ""
+
             is_challenge = False
             for trigger in CHALLENGE_TITLES:
                 if trigger.lower() in title.lower() or "challenge-running" in content:
@@ -263,11 +268,26 @@ async def wait_for_completion(page):
                         log("[INFO] CloudFlare challenge detected")
                         cf_challenge_detected = True
                     break
+
             if not is_challenge:
                 if cf_challenge_detected:
                     log(f"[INFO] CloudFlare challenge solved after {'{:.2f}'.format(elapsed)}s")
+
+                    # Ensure the destination page has finished loading post-redirection
+                    wait_start = time.time()
+                    while time.time() - wait_start < 15.0:
+                        try:
+                            ready_state = await page.evaluate("document.readyState")
+                            if ready_state == "complete":
+                                log("[INFO] Destination page fully loaded and ready.")
+                                break
+                        except Exception:
+                            # Expected if context is destroyed during the redirect phase
+                            pass
+                        await asyncio.sleep(0.5)
+
                 return "html", None, None
-        except:
+        except Exception:
             pass
 
         # 3. INTERACTION (Delayed Click)
@@ -293,7 +313,7 @@ async def process_request_in_tab(url):
     current_download["completed"] = False
     current_download["event"].clear()
 
-    # Clean up temp dir just in case
+    # Flush ephemeral download directory
     for f in os.listdir(RUNTIME_TEMP_DIR):
         try:
             os.remove(os.path.join(RUNTIME_TEMP_DIR, f))
@@ -356,7 +376,7 @@ async def process_request_in_tab(url):
     elif result_type == "html":
         try:
             async def extract_data():
-                # BYPASS NODRIVER ISSUE WITH NEW CHROME COOKIES FORMAT
+                # Execute raw CDP command to bypass JSON parsing issues with partitioned cookies in Chrome 130+
                 def raw_get_cookies(urls):
                     cmd_dict = {
                         "method": "Network.getCookies",
@@ -365,15 +385,13 @@ async def process_request_in_tab(url):
                     response = yield cmd_dict
                     return response.get("cookies", [])
 
-                log("[INFO] Extracting cookies...")
                 raw_cookies = await page.send(raw_get_cookies([url]))
-                log("[INFO] Extracting user agent...")
                 ua = await page.evaluate("navigator.userAgent")
-                log("[INFO] Extracting HTML content...")
                 html = await page.get_content()
 
                 return raw_cookies, ua, html
 
+            # Cap extraction phase to prevent stalling on continuous reloads
             cdp_cookies, user_agent, html_content = await asyncio.wait_for(extract_data(), timeout=15.0)
 
             cookies = []
@@ -401,20 +419,28 @@ async def process_request_in_tab(url):
                     "response": html_content
                 }
             }
+        except asyncio.TimeoutError:
+            log("[ERROR] Timeout while extracting HTML/Cookies. Page might be stuck reloading.")
+            return {"status": "error", "message": "Extraction timeout (page hung)"}
         except Exception as e:
             log(f"[ERROR] Error: {str(e)}")
             return {"status": "error", "message": str(e)}
 
-    # Fallback (Should be unreachable with infinite loop, but safe to keep)
     return {"status": "error", "message": "Unknown error"}
 
 
-async def solve_challenge(url):
+async def solve_challenge(url, request_timeout):
     global browser
     await browser_lock.acquire()
 
     try:
-        return await process_request_in_tab(url)
+        # Apply the execution timeout here, ensuring queue wait time does not consume the request quota
+        return await asyncio.wait_for(process_request_in_tab(url), timeout=request_timeout)
+    except asyncio.TimeoutError:
+        log(f"[CRITICAL] EXECUTION TIMEOUT ({request_timeout}s)! Killing browser.")
+        await force_kill_chrome()
+        browser = None
+        return {"status": "error", "message": "Execution Timeout"}
     except Exception as e:
         log(f"[CRITICAL] Browser Error: {e}. Killing Chrome...")
         await force_kill_chrome()
@@ -441,21 +467,11 @@ async def handle_post(request):
         elif cmd == 'sessions.destroy':
             return web.json_response({"status": "ok", "message": "Session destroyed"})
         elif cmd in ['request.get', 'request.post']:
-            try:
-                log(f"[QUEUE] Request received: {data.get('url')} (timeout: {request_timeout}s)")
+            log(f"[QUEUE] Request received: {data.get('url')} (execution timeout: {request_timeout}s)")
 
-                # SUPERVISOR TIMEOUT
-                # This wait_for controls the entire execution life-cycle.
-                return web.json_response(
-                    await asyncio.wait_for(solve_challenge(data.get('url')), timeout=request_timeout)
-                )
-            except asyncio.TimeoutError:
-                log(f"[CRITICAL] REQUEST TIMEOUT ({request_timeout}s)! Killing browser.")
-                await force_kill_chrome()
-                # Break lock
-                if browser_lock.locked():
-                    browser_lock.release()
-                return web.json_response({"status": "error", "message": "Request Timeout"})
+            # Offload execution to the queue supervisor
+            return web.json_response(await solve_challenge(data.get('url'), request_timeout))
+
         else:
             return web.json_response({"status": "error", "message": "Command not implemented"})
     except Exception as e:
@@ -474,7 +490,6 @@ async def main():
     smart_wait(STARTUP_DELAY_SECONDS)
     await force_kill_chrome()
 
-    # Safe Temp Directory Context
     with tempfile.TemporaryDirectory(prefix="flaresolverr_lite_dl_") as tmp_dir:
         RUNTIME_TEMP_DIR = tmp_dir
         log(f"[INIT] Ephemeral download directory: {RUNTIME_TEMP_DIR}")
