@@ -314,11 +314,18 @@ async def process_request_in_tab(url):
     current_download["event"].clear()
 
     # Flush ephemeral download directory
-    for f in os.listdir(RUNTIME_TEMP_DIR):
+    if not os.path.exists(RUNTIME_TEMP_DIR):
         try:
-            os.remove(os.path.join(RUNTIME_TEMP_DIR, f))
-        except:
-            pass
+            os.makedirs(RUNTIME_TEMP_DIR, exist_ok=True)
+            log("[WARN] Ephemeral download directory was deleted externally. Recreated.")
+        except Exception as e:
+            log(f"[ERROR] Could not recreate ephemeral directory: {e}")
+    else:
+        for f in os.listdir(RUNTIME_TEMP_DIR):
+            try:
+                os.remove(os.path.join(RUNTIME_TEMP_DIR, f))
+            except:
+                pass
 
     page = await get_main_tab()
     await page.bring_to_front()
