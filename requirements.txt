@@ -1,3 +1,5 @@
-nodriver>=0.30
+# Floor = version this script is written against (uses Browser.stopped / Connection.socket).
+# Deliberately no upper bound: nodriver must be free to follow Chrome/Cloudflare changes.
+nodriver>=0.50.3
 aiohttp
 opencv-python-headless

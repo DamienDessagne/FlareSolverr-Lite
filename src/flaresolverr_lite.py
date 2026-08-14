@@ -113,10 +113,7 @@ async def force_kill_chrome():
     # 1. Graceful stop attempt
     if browser:
         try:
-            if hasattr(browser, "connection") and browser.connection:
-                await browser.connection.close()
-            if hasattr(browser, "stop"):
-                await browser.stop()
+            await browser.aclose()
         except Exception:
             pass
     browser = None
@@ -212,7 +209,8 @@ async def start_browser():
 
 async def get_main_tab():
     global browser
-    if not browser or not browser.connection or browser.connection.closed:
+    # Only restart if the browser is actually dead: the process exited, or its websocket is gone/closed
+    if not browser or browser.stopped or not browser.socket or bool(browser.socket.close_code):
         await force_kill_chrome()
         if not await start_browser():
             raise Exception("Browser unavailable")
