@@ -28,6 +28,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PORT = 8191  # The port the server will listen on
 CHROME_PROFILE = os.path.join(PROJECT_ROOT, "chrome_profile")  # The Chrome profile to use
+CHROME_PATH = ""  # Path to the Chrome binary. Leave empty to let nodriver auto-detect it (see notes below)
 STARTUP_DELAY_SECONDS = 90  # Time to wait before starting the server
 
 # TIMEOUTS (Seconds)
@@ -163,6 +164,13 @@ async def start_browser():
     if not RUNTIME_TEMP_DIR:
         raise Exception("Temp Directory not initialized!")
 
+    if CHROME_PATH:
+        if not os.path.isfile(CHROME_PATH) or not os.access(CHROME_PATH, os.X_OK):
+            log(f"[CRITICAL] CHROME_PATH is set but is not an executable file: {CHROME_PATH}")
+            return False
+        log(f"[INFO] Using configured Chrome binary: {CHROME_PATH}")
+
+    last_error = None
     for attempt in range(1, 4):
         try:
             config_args = [
@@ -177,7 +185,8 @@ async def start_browser():
             browser = await uc.start(
                 user_data_dir=CHROME_PROFILE,
                 headless=False,
-                browser_args=config_args
+                browser_args=config_args,
+                browser_executable_path=CHROME_PATH or None
             )
 
             try:
@@ -200,10 +209,14 @@ async def start_browser():
             log(f"[INFO] Chrome started. Downloads routed to: {RUNTIME_TEMP_DIR}")
             return True
         except Exception as e:
-            log(f"[WARN] Start attempt {attempt}/3 failed: {e}")
+            last_error = e
+            log(f"[WARN] Start attempt {attempt}/3 failed: {type(e).__name__}: {e}")
             await force_kill_chrome()
 
-    log("[CRITICAL] Could not start Chrome.")
+    log(f"[CRITICAL] Could not start Chrome: {type(last_error).__name__}: {last_error}")
+    if isinstance(last_error, FileNotFoundError) and not CHROME_PATH:
+        log("[CRITICAL] Chrome was not found automatically (nodriver only scans $PATH on Linux, so a "
+            "flatpak/snap install is invisible to it). Set CHROME_PATH in the CONFIGURATION section.")
     return False
 
 
