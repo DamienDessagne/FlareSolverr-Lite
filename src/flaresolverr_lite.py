@@ -34,6 +34,7 @@ STARTUP_DELAY_SECONDS = 90  # Time to wait before starting the server
 
 # TIMEOUTS (Seconds)
 CF_CLICK_DELAY = 20  # Delay before attempting a forced click on challenges
+CHALLENGE_GIVE_UP = 60  # Give up on a challenge still unsolved after this long (keeps the browser alive)
 DEFAULT_REQUEST_TIMEOUT = 180  # Default hard cap if the client doesn't provide a maxTimeout
 NAV_COMMIT_TIMEOUT = 30  # Max wait for the browser to actually replace the current document
 PAGE_LOAD_TIMEOUT = 15  # Max wait for the destination page to finish loading before extraction
@@ -382,6 +383,7 @@ async def wait_for_completion(page):
     start_time = time.time()
     cf_challenge_detected = False
     click_triggered = False
+    last_progress_log = 0
 
     while True:
         # 1. DOWNLOAD (Priority)
@@ -442,7 +444,14 @@ async def wait_for_completion(page):
             await safe_verify_cf(page)
             click_triggered = True
 
-        if int(elapsed) % 5 == 0 and int(elapsed) > 0:
+        # 4. GIVE UP on a challenge that never resolves (IP ban, hard block): returning an error
+        # here keeps the browser alive instead of letting the execution timeout kill it.
+        if cf_challenge_detected and click_triggered and elapsed > CHALLENGE_GIVE_UP:
+            log(f"[ERROR] Challenge still unsolved after {int(elapsed)}s. Giving up (browser kept alive).")
+            return "blocked", None, None
+
+        if int(elapsed) - last_progress_log >= 5:
+            last_progress_log = int(elapsed)
             log(f"[WAIT] Processing... ({int(elapsed)}s)")
 
         await asyncio.sleep(1)
@@ -486,6 +495,10 @@ async def process_request_in_tab(url):
         return {"status": "error", "message": "Navigation did not commit"}
 
     result_type, filename, filepath = await wait_for_completion(page)
+
+    # --- RESULT: BLOCKED ---
+    if result_type == "blocked":
+        return {"status": "error", "message": f"Challenge not solved after {CHALLENGE_GIVE_UP}s (page still blocked)"}
 
     # --- RESULT: DOWNLOAD ---
     if result_type == "download" and filepath:
