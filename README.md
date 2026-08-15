@@ -14,7 +14,7 @@ Original FlareSolverr is great but often struggles with **Cloudflare v2 detectio
 
 ## Installation
 1. Install [Google Chrome](https://www.google.com/chrome/).
-2. Install [Python 3.8+](https://www.python.org/).
+2. Install [Python 3.10+](https://www.python.org/).
 3. Download or clone this repo.
 4. Install dependencies: `pip install -r requirements.txt`
 
@@ -25,6 +25,6 @@ The server listens on `http://localhost:8191`.
 ## Notes
 - Running the browser non-headless **HIGHLY** improves the chances of CloudFlare considering you as a normal user and not blocking on challenges.
 - If you keep getting stuck on CloudFlare challenges, try logging in with a Chrome account directly in Chrome.
-- You can configure the script to your liking directly in `src/falresolverr-lite.py`. The CONFIGURATION section on top contains everything you should need.
+- You can configure the script to your liking directly in `src/flaresolverr_lite.py`. The CONFIGURATION section on top contains everything you should need.
 - If the script fails to start Chrome, set `CHROME_PATH` to your Chrome binary. Nodriver only looks for it in your `PATH` on Linux, so a flatpak or snap install, or a launch from a service with a reduced `PATH`, will not be found automatically.
 - The wait at the start of the script is not necessary, it is useful if you run the script at OS startup or session opening, when everything else is starting at the same time and starting Chrome is a bit of a heavy burden.
