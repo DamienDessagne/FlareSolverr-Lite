@@ -1,6 +1,7 @@
 import asyncio
 import mimetypes
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -114,6 +115,9 @@ async def force_kill_chrome():
     global browser
     log("[INFO] Maintenance: Killing old script-specific Chrome processes...")
 
+    # Capture the PID before aclose(), which clears it on success
+    pid = getattr(browser, '_process_pid', None) if browser else None
+
     # 1. Graceful stop attempt
     if browser:
         try:
@@ -122,18 +126,34 @@ async def force_kill_chrome():
             pass
     browser = None
 
-    # 2. Targeted Process Kill
+    # 2. Kill by PID: only ever touches the exact Chrome this script started. Killing the root
+    #    browser process takes its renderer/gpu children down with it.
+    if pid:
+        try:
+            if os.name == 'nt':
+                subprocess.run(f'taskkill /F /T /PID {pid}', shell=True,
+                               stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+        return
+
+    # 3. Fallback sweep when no PID is known (leftovers of a previous run, at startup): match on
+    #    the full profile path so Chrome instances opened by the user are never touched.
     try:
         if os.name == 'nt':
-            profile_folder = os.path.basename(CHROME_PROFILE)
-            cmd = f'wmic process where "name=\'chrome.exe\' and commandline like \'%{profile_folder}%\'" call terminate'
-            subprocess.run(cmd, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-            await asyncio.sleep(2)
+            # Get-CimInstance works on Win10 and Win11 alike (wmic was removed in Win11 24H2+)
+            ps = ("Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                  f"Where-Object {{ $_.CommandLine -like '*{CHROME_PROFILE}*' }} | "
+                  "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         else:
-            profile_folder = os.path.basename(CHROME_PROFILE)
-            subprocess.run(f"pkill -f {profile_folder}", shell=True, stderr=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL)
-            await asyncio.sleep(2)
+            subprocess.run(["pkill", "-f", CHROME_PROFILE],
+                           stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        await asyncio.sleep(2)
     except Exception:
         pass
 
