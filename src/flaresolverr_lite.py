@@ -34,6 +34,9 @@ STARTUP_DELAY_SECONDS = 90  # Time to wait before starting the server
 # TIMEOUTS (Seconds)
 CF_CLICK_DELAY = 20  # Delay before attempting a forced click on challenges
 DEFAULT_REQUEST_TIMEOUT = 180  # Default hard cap if the client doesn't provide a maxTimeout
+NAV_COMMIT_TIMEOUT = 30  # Max wait for the browser to actually replace the current document
+PAGE_LOAD_TIMEOUT = 15  # Max wait for the destination page to finish loading before extraction
+DOM_READY_GRACE = 10  # Read a still-loading document anyway once it has been pending this long
 
 # ---------------------
 
@@ -239,6 +242,114 @@ async def get_main_tab():
         return await browser.get("about:blank", new_tab=True, new_window=False)
 
 
+async def eval_js(page, expression, timeout=2.0):
+    """Evaluate an expression and return its string result, or None if it could not be read.
+
+    nodriver's evaluate() returns an ExceptionDetails/RemoteObject instead of raising when the JS
+    fails or the execution context is being swapped mid-navigation, so anything that is not a
+    plain string means "unknown" and must never be mistaken for an answer.
+    """
+    try:
+        result = await asyncio.wait_for(page.evaluate(expression), timeout=timeout)
+    except Exception:
+        return None
+    return result if isinstance(result, str) else None
+
+
+async def wait_for_download_start(timeout=5.0):
+    start = time.time()
+    while time.time() - start < timeout:
+        if current_download["active"]:
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def navigate_and_commit(page, url):
+    """Navigate the tab we actually observe, and wait until the old document is really gone.
+
+    page.get() cannot be used for this: it returns as soon as Page.navigate is acknowledged (its
+    load-event wait is dead code in current nodriver), and it navigates the first page target
+    instead of this tab. Both the target and the timing would be wrong. A marker planted in the
+    current document tells us exactly when that document has been replaced.
+
+    Returns (committed, error_text).
+    """
+    token = f"fsl_{time.time_ns()}"
+    marker_set = await eval_js(page, f"window.__fsl_nav = '{token}'; window.__fsl_nav") == token
+
+    try:
+        _, _, error_text, is_download = await asyncio.wait_for(
+            page.send(cdp.page.navigate(url)), timeout=15.0)
+    except asyncio.TimeoutError:
+        return False, "Page.navigate timed out"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+    # A download never commits a document: the CDP handlers take over from here
+    if is_download:
+        if not await wait_for_download_start():
+            log("[WARN] Navigation reported a download that never started.")
+        return True, None
+    if current_download["active"]:
+        return True, None
+    # ERR_ABORTED is also what a Content-Disposition download looks like when Chrome does not
+    # flag it, so let the wait loop below decide between a download and a real failure
+    if error_text and "ERR_ABORTED" not in error_text:
+        return False, error_text
+
+    if not marker_set:
+        # about:blank, a chrome:// page or a context being torn down: no marker to watch
+        log("[WARN] Could not tag the previous document, falling back to a timed wait.")
+        await asyncio.sleep(1.5)
+        return True, None
+
+    start = time.time()
+    while time.time() - start < NAV_COMMIT_TIMEOUT:
+        if current_download["active"]:
+            return True, None
+
+        # Only an explicit 'new' proves the document was replaced. Read errors happen while the
+        # context is being swapped, and must keep us waiting rather than end the wait early.
+        state = await eval_js(page, f"(window.__fsl_nav === '{token}') ? 'old' : 'new'")
+        if state == "new":
+            return True, None
+
+        await asyncio.sleep(0.25)
+
+    return False, None
+
+
+async def wait_for_full_load(page, timeout=PAGE_LOAD_TIMEOUT):
+    start = time.time()
+    while time.time() - start < timeout:
+        if current_download["active"]:
+            return False
+        # Read failures are expected while the context is destroyed during a redirect
+        if await eval_js(page, "document.readyState") == "complete":
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def detect_challenge(page):
+    """True if the tab currently shows a challenge, False if not, None if it could not be read."""
+    title = await eval_js(page, "document.title")
+    try:
+        content = await asyncio.wait_for(page.get_content(), timeout=2.0) or ""
+    except Exception:
+        content = ""
+
+    if title is None and not content:
+        return None
+
+    title = title or ""
+    for trigger in CHALLENGE_TITLES:
+        if trigger.lower() in title.lower() or "challenge-running" in content:
+            return True
+    return False
+
+
 async def safe_verify_cf(page):
     try:
         await asyncio.wait_for(page.verify_cf(), timeout=10.0)
@@ -266,40 +377,44 @@ async def wait_for_completion(page):
 
         # 2. HTML CONTENT
         elapsed = time.time() - start_time
-        try:
-            # Brief timeouts prevent deadlocks if the execution context is destroyed during navigation
-            title = await asyncio.wait_for(page.evaluate("document.title"), timeout=2.0) or ""
-            content = await asyncio.wait_for(page.get_content(), timeout=2.0) or ""
 
-            is_challenge = False
-            for trigger in CHALLENGE_TITLES:
-                if trigger.lower() in title.lower() or "challenge-running" in content:
-                    is_challenge = True
-                    if not cf_challenge_detected:
-                        log("[INFO] CloudFlare challenge detected")
-                        cf_challenge_detected = True
-                    break
+        # A document that just committed is still empty: reading it now would show neither a
+        # challenge nor content, and would be reported as a successful blank page. Wait for the
+        # parser, but never hang forever on a page whose subresources stall.
+        if await eval_js(page, "document.readyState") not in ("interactive", "complete") \
+                and elapsed < DOM_READY_GRACE:
+            await asyncio.sleep(1)
+            continue
 
-            if not is_challenge:
+        # None means the tab could not be read at all: stay in the loop rather than guess
+        is_challenge = await detect_challenge(page)
+
+        if is_challenge and not cf_challenge_detected:
+            log("[INFO] CloudFlare challenge detected")
+            cf_challenge_detected = True
+
+        if is_challenge is False:
+            # Let the page settle before deciding, then confirm: a challenge caught between two
+            # of its own reloads reads as a blank, challenge-free document.
+            settled = await wait_for_full_load(page)
+            if current_download["active"]:
+                # A download started while waiting: hand it back to the interceptor
+                continue
+
+            if await detect_challenge(page):
+                if not cf_challenge_detected:
+                    log("[INFO] CloudFlare challenge detected")
+                    cf_challenge_detected = True
+            else:
                 if cf_challenge_detected:
-                    log(f"[INFO] CloudFlare challenge solved after {'{:.2f}'.format(elapsed)}s")
-
-                    # Ensure the destination page has finished loading post-redirection
-                    wait_start = time.time()
-                    while time.time() - wait_start < 15.0:
-                        try:
-                            ready_state = await page.evaluate("document.readyState")
-                            if ready_state == "complete":
-                                log("[INFO] Destination page fully loaded and ready.")
-                                break
-                        except Exception:
-                            # Expected if context is destroyed during the redirect phase
-                            pass
-                        await asyncio.sleep(0.5)
+                    log(f"[INFO] CloudFlare challenge solved after "
+                        f"{'{:.2f}'.format(time.time() - start_time)}s")
+                if settled:
+                    log("[INFO] Destination page fully loaded and ready.")
+                else:
+                    log("[WARN] Destination page still loading, extracting anyway.")
 
                 return "html", None, None
-        except Exception:
-            pass
 
         # 3. INTERACTION (Delayed Click)
         if elapsed > CF_CLICK_DELAY and not click_triggered:
@@ -341,10 +456,14 @@ async def process_request_in_tab(url):
     page = await get_main_tab()
     await page.bring_to_front()
 
-    try:
-        await page.get(url)
-    except Exception:
-        pass
+    committed, nav_error = await navigate_and_commit(page, url)
+    if nav_error:
+        log(f"[ERROR] Navigation failed: {nav_error}")
+        return {"status": "error", "message": f"Navigation failed: {nav_error}"}
+    if not committed:
+        # Returning here rather than reading the tab: whatever it still holds is the previous page
+        log(f"[ERROR] Navigation never committed after {NAV_COMMIT_TIMEOUT}s (document unchanged).")
+        return {"status": "error", "message": "Navigation did not commit"}
 
     result_type, filename, filepath = await wait_for_completion(page)
 
