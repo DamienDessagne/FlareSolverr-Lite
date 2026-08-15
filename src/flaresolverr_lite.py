@@ -654,9 +654,6 @@ async def main():
     print("      FLARESOLVERR-LITE      ")
     print("=============================")
 
-    import urllib3
-    urllib3.disable_warnings()
-
     smart_wait(STARTUP_DELAY_SECONDS)
     await force_kill_chrome()
 
